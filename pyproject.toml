@@ -1,0 +1,27 @@
+[project]
+name = "autonomous-research-lab"
+version = "0.1.0"
+description = "Experimental autonomous research agent system"
+requires-python = ">=3.12"
+dependencies = [
+    "fastapi>=0.115.0",
+    "uvicorn[standard]>=0.32.0",
+    "pydantic>=2.9.0",
+    "pydantic-settings>=2.6.0",
+    "httpx>=0.27.0",
+    "sqlalchemy[asyncio]>=2.0.36",
+    "asyncpg>=0.30.0",
+    "anthropic>=0.39.0",
+    "groq>=0.11.0",
+    "ollama>=0.3.3",
+    "python-dotenv>=1.0.1",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.3.0",
+    "pytest-asyncio>=0.24.0",
+]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
