@@ -1,0 +1,24 @@
+import asyncio
+
+from app.models.ollama_provider import OllamaProvider
+from app.tools.base import ToolRegistry
+from app.tools.calculator import CalculatorTool
+from app.agents.research_agent import ResearchAgent
+
+
+async def main():
+    registry = ToolRegistry()
+    registry.register(CalculatorTool())
+
+    provider = OllamaProvider()
+    agent = ResearchAgent(model=provider, tools=registry)
+
+    result = await agent.run("What is 47 multiplied by 23, minus 100?")
+
+    print(result)
+    print("\n--- full message history ---")
+    for m in result.messages:
+        print(f"[{m.role}] {m.content}")
+
+
+asyncio.run(main())
