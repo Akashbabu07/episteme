@@ -20,3 +20,5 @@ services:
 volumes:
   pgdata:
   ollama_data:
+    external: true
+    name: ollama

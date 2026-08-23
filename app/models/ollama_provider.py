@@ -41,11 +41,13 @@ class OllamaProvider(ModelInterface):
 
         finish_reason = "tool_calls" if tool_calls else "stop"
 
+        response_dict = response.model_dump() if hasattr(response, "model_dump") else dict(response)
+
         return ModelResponse(
             content=message.get("content"),
             tool_calls=tool_calls,
             finish_reason=finish_reason,
-            input_tokens=response.get("prompt_eval_count", 0),
-            output_tokens=response.get("eval_count", 0),
-            raw=response,
+            input_tokens=response_dict.get("prompt_eval_count", 0),
+            output_tokens=response_dict.get("eval_count", 0),
+            raw=response_dict,
         )
