@@ -10,7 +10,7 @@ from app.tools.fetch_page import FetchPageTool
 from app.agents.research_agent import ResearchAgent
 from app.observability.trace import TraceRecorder
 from app.evidence.schemas import ResearchAnswer
-
+from app.memory.store import MemoryStore
 app = FastAPI(title="Autonomous Research Lab", version="0.1.0")
 
 
@@ -37,7 +37,8 @@ async def research(request: ResearchRequest) -> ResearchAnswer:
 
     async with get_session() as session:
         tracer = TraceRecorder(session)
-        final_answer = await orchestrator.run(request.question, tracer=tracer)
+        memory = MemoryStore(session)
+        final_answer = await orchestrator.run(request.question, tracer=tracer, memory=memory)
 
     return ResearchAnswer(
         question=request.question,
