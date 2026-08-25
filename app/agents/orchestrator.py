@@ -3,6 +3,7 @@ from app.agents.research_agent import ResearchAgent, AgentRunResult
 from app.models.base import Message, ModelInterface
 from app.observability.trace import TraceRecorder
 from app.tools.base import ToolRegistry
+from app.memory.store import MemoryStore
 
 
 class TaskResult:
@@ -31,7 +32,12 @@ class Orchestrator:
         self.tools = tools
         self.planner = Planner(model)
 
-    async def run(self, question: str, tracer: TraceRecorder | None = None) -> str:
+    async def run(
+        self,
+        question: str,
+        tracer: TraceRecorder | None = None,
+        memory: MemoryStore | None = None,
+    ) -> str:
         if tracer:
             await tracer.start_run(question)
 
@@ -46,9 +52,27 @@ class Orchestrator:
 
         task_results: list[TaskResult] = []
         for task in plan.tasks:
+            task_prompt = task.description
+
+            if memory:
+                relevant = await memory.retrieve_relevant(task.description)
+                if relevant:
+                    context = "\n".join(f"- {r}" for r in relevant)
+                    task_prompt = (
+                        f"{task.description}\n\n"
+                        f"Relevant prior findings (use if helpful, verify if uncertain):\n{context}"
+                    )
+
             executor = ResearchAgent(model=self.model, tools=self.tools)
-            result = await executor.run(task.description, tracer=tracer)
+            result = await executor.run(task_prompt, tracer=tracer)
             task_results.append(TaskResult(task.id, task.description, result))
+
+            if memory and result.final_answer:
+                await memory.store(
+                    run_id=tracer.run_id if tracer else uuid.uuid4(),
+                    memory_type="research_finding",
+                    content=f"{task.description} → {result.final_answer}",
+                )
 
         final_answer = await self._synthesize(question, task_results)
 
@@ -58,7 +82,7 @@ class Orchestrator:
                 status="completed",
                 final_answer=final_answer,
                 stopped_reason="completed" if failed_count == 0 else "completed_with_failures",
-                total_input_tokens=0,  # aggregated per-task already recorded individually
+                total_input_tokens=0,
                 total_output_tokens=0,
             )
 
