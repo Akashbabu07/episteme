@@ -1,6 +1,6 @@
 from fastapi import FastAPI
 from pydantic import BaseModel
-
+from app.agents.orchestrator import Orchestrator
 from app.infrastructure.db import init_db, get_session
 from app.models.ollama_provider import OllamaProvider
 from app.tools.base import ToolRegistry
@@ -22,32 +22,30 @@ class ResearchRequest(BaseModel):
 async def startup() -> None:
     await init_db()
 
-
-def build_agent() -> ResearchAgent:
+def build_agent() -> Orchestrator:
     registry = ToolRegistry()
     registry.register(CalculatorTool())
     registry.register(WebSearchTool())
     registry.register(FetchPageTool())
     provider = OllamaProvider()
-    return ResearchAgent(model=provider, tools=registry)
+    return Orchestrator(model=provider, tools=registry)
 
 
 @app.post("/research", response_model=ResearchAnswer)
 async def research(request: ResearchRequest) -> ResearchAnswer:
-    agent = build_agent()
+    orchestrator = build_agent()
 
     async with get_session() as session:
         tracer = TraceRecorder(session)
-        result = await agent.run(request.question, tracer=tracer)
+        final_answer = await orchestrator.run(request.question, tracer=tracer)
 
     return ResearchAnswer(
         question=request.question,
-        answer=result.final_answer or "No answer produced.",
+        answer=final_answer,
         claims=[],
         run_id=str(tracer.run_id),
-        stopped_reason=result.stopped_reason,
+        stopped_reason="completed",
     )
-
 
 @app.get("/health")
 async def health() -> dict[str, str]:
