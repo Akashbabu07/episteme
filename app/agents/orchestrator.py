@@ -1,5 +1,7 @@
+import asyncio
 import uuid
 
+from app.infrastructure.db import get_session
 from app.agents.planner import Planner, ResearchPlan
 from app.agents.research_agent import ResearchAgent, AgentRunResult
 from app.agents.roles import (
@@ -48,26 +50,13 @@ class Orchestrator:
                 output_data={"tasks": [t.model_dump() for t in plan.tasks]},
             )
 
-        # --- Stage 2: Research (one Researcher per task) ---
-        task_results: list[TaskResult] = []
-        for task in plan.tasks:
-            task_prompt = task.description
-            if memory:
-                relevant = await memory.retrieve_relevant(task.description)
-                if relevant:
-                    context = "\n".join(f"- {r}" for r in relevant)
-                    task_prompt = f"{task.description}\n\nRelevant prior findings:\n{context}"
-
-            researcher = ResearchAgent(model=self.model, tools=self.tools)
-            result = await researcher.run(task_prompt, tracer=tracer, record_run=False)
-            task_results.append(TaskResult(task.id, task.description, result))
-
-            if memory and result.final_answer:
-                await memory.store(
-                    run_id=tracer.run_id if tracer else uuid.uuid4(),
-                    memory_type="research_finding",
-                    content=f"{task.description} → {result.final_answer}",
-                )
+        # --- Stage 2: Research (PARALLEL — one Researcher per task) ---
+        run_id = tracer.run_id if tracer else uuid.uuid4()
+        task_results = await asyncio.gather(
+            *[self._run_task_isolated(task, run_id, memory) for task in plan.tasks],
+            return_exceptions=False,  # _run_task_isolated already catches internally
+        )
+        task_results = list(task_results)
 
         findings_text = self._format_findings(task_results)
 
@@ -118,6 +107,54 @@ class Orchestrator:
             )
 
         return final_answer
+
+    async def _run_task_isolated(
+        self,
+        task,
+        run_id: uuid.UUID,
+        memory: MemoryStore | None,
+    ) -> TaskResult:
+        """Runs one research task with its own DB session — required for
+        safe concurrent writes. Never raises; failures are captured in the
+        result so one bad task can't take down the whole gather()."""
+
+        task_prompt = task.description
+        try:
+            if memory:
+                relevant = await memory.retrieve_relevant(task.description)
+                if relevant:
+                    context = "\n".join(f"- {r}" for r in relevant)
+                    task_prompt = f"{task.description}\n\nRelevant prior findings:\n{context}"
+
+            async with get_session() as isolated_session:
+                isolated_tracer = TraceRecorder(isolated_session)
+                isolated_tracer.run_id = run_id  # attach to the SAME run, don't start a new one
+
+                researcher = ResearchAgent(model=self.model, tools=self.tools)
+                result = await researcher.run(task_prompt, tracer=isolated_tracer, record_run=False)
+
+            if memory and result.final_answer:
+                # Memory writes use their own session too, for the same reason
+                async with get_session() as mem_session:
+                    mem_store = MemoryStore(mem_session)
+                    await mem_store.store(
+                        run_id=run_id,
+                        memory_type="research_finding",
+                        content=f"{task.description} → {result.final_answer}",
+                    )
+
+            return TaskResult(task.id, task.description, result)
+
+        except Exception as e:
+            failed_result = AgentRunResult(
+                final_answer=None,
+                messages=[],
+                steps_taken=0,
+                stopped_reason=f"error: {e}",
+                total_input_tokens=0,
+                total_output_tokens=0,
+            )
+            return TaskResult(task.id, task.description, failed_result)
 
     def _format_findings(self, task_results: list[TaskResult]) -> str:
         lines = []
