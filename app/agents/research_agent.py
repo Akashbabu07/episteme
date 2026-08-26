@@ -4,7 +4,7 @@ from app.config.settings import get_settings
 from app.models.base import Message, ModelInterface
 from app.tools.base import ToolRegistry
 from app.observability.trace import TraceRecorder
-
+from app.agents.roles import RESEARCHER_SYSTEM_PROMPT
 
 class AgentRunResult:
     def __init__(
@@ -39,25 +39,26 @@ SYSTEM_PROMPT = (
     "have everything you need."
 )
 
-
 class ResearchAgent:
-    def __init__(self, model: ModelInterface, tools: ToolRegistry) -> None:
+    def __init__(
+        self,
+        model: ModelInterface,
+        tools: ToolRegistry,
+        system_prompt: str = RESEARCHER_SYSTEM_PROMPT,
+    ) -> None:
         self.model = model
         self.tools = tools
+        self.system_prompt = system_prompt
         self.settings = get_settings()
 
     async def run(
-        self,
-        question: str,
-        tracer: TraceRecorder | None = None,
+        self, question: str, tracer: TraceRecorder | None = None, record_run: bool = True
     ) -> AgentRunResult:
-
-        # Start tracing this run
-        if tracer:
+        if tracer and record_run:
             await tracer.start_run(question)
 
         messages: list[Message] = [
-            Message(role="system", content=SYSTEM_PROMPT),
+            Message(role="system", content=self.system_prompt),
             Message(role="user", content=question),
         ]
 
