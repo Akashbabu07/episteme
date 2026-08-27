@@ -11,6 +11,7 @@ from app.agents.roles import (
     CHALLENGER_SYSTEM_PROMPT,
     UPDATED_SYNTHESIZER_SYSTEM_PROMPT,
 )
+from app.agents.strategy_selector import StrategySelector, Strategy
 from app.models.base import Message, ModelInterface
 from app.memory.store import MemoryStore
 from app.observability.trace import TraceRecorder
@@ -33,17 +34,71 @@ class Orchestrator:
         self.model = model
         self.tools = tools
         self.planner = Planner(model)
+        self.strategy_selector = StrategySelector(model)
+
+    # ------------------------------------------------------------------
+    # Entry point
+    # ------------------------------------------------------------------
 
     async def run(
         self,
         question: str,
         tracer: TraceRecorder | None = None,
         memory: MemoryStore | None = None,
+        force_strategy: Strategy | None = None,
     ) -> str:
         if tracer:
             await tracer.start_run(question)
 
-        # --- Stage 1: Plan ---
+        # --- Stage 0: Select Strategy ---
+        if force_strategy:
+            decision_strategy = force_strategy
+            decision_reasoning = "Strategy forced by caller."
+        else:
+            decision = await self.strategy_selector.select(question)
+            decision_strategy = decision.strategy
+            decision_reasoning = decision.reasoning
+
+        if tracer:
+            await tracer.record_step(
+                step_type="strategy_selection",
+                input_data={"question": question},
+                output_data={"strategy": decision_strategy.value, "reasoning": decision_reasoning},
+            )
+
+        if decision_strategy == Strategy.FAST:
+            return await self._run_fast(question, tracer)
+        elif decision_strategy == Strategy.STANDARD:
+            return await self._run_standard(question, tracer, memory)
+        else:
+            return await self._run_rigorous(question, tracer, memory)
+
+    # ------------------------------------------------------------------
+    # Strategy A — Fast: single agent, no plan, no verification overhead
+    # ------------------------------------------------------------------
+
+    async def _run_fast(self, question: str, tracer: TraceRecorder | None) -> str:
+        researcher = ResearchAgent(model=self.model, tools=self.tools)
+        result = await researcher.run(question, tracer=tracer, record_run=False)
+        final_answer = result.final_answer or "Unable to produce an answer."
+
+        if tracer:
+            await tracer.finish_run(
+                status="completed",
+                final_answer=final_answer,
+                stopped_reason=result.stopped_reason,
+                total_input_tokens=result.total_input_tokens,
+                total_output_tokens=result.total_output_tokens,
+            )
+        return final_answer
+
+    # ------------------------------------------------------------------
+    # Strategy B — Standard: plan + parallel research + fact-check + critique
+    # ------------------------------------------------------------------
+
+    async def _run_standard(
+        self, question: str, tracer: TraceRecorder | None, memory: MemoryStore | None
+    ) -> str:
         plan = await self.planner.create_plan(question)
         if tracer:
             await tracer.record_step(
@@ -52,51 +107,53 @@ class Orchestrator:
                 output_data={"tasks": [t.model_dump() for t in plan.tasks]},
             )
 
-        # --- Stage 2: Research (parallel) ---
         run_id = tracer.run_id if tracer else uuid.uuid4()
-        task_results = await asyncio.gather(
+        task_results = list(await asyncio.gather(
             *[self._run_task_isolated(task, run_id, memory) for task in plan.tasks],
-        )
-        task_results = list(task_results)
+        ))
         findings_text = self._format_findings(task_results)
 
-        # --- Stage 3: Fact Check ---
-        fact_checker = ResearchAgent(
-            model=self.model, tools=self.tools, system_prompt=FACT_CHECKER_SYSTEM_PROMPT
-        )
-        fact_check_result = await fact_checker.run(
-            f"Findings to verify:\n{findings_text}", tracer=tracer, record_run=False
-        )
-        fact_check_notes = fact_check_result.final_answer or "No fact-check notes produced."
+        fact_check_notes = await self._run_fact_check(findings_text, tracer)
+        critique_notes = await self._run_critique(findings_text, fact_check_notes, tracer)
+
+        final_answer = await self._synthesize_draft(question, findings_text, fact_check_notes, critique_notes)
+
+        if tracer:
+            failed_count = sum(1 for t in task_results if not t.succeeded)
+            await tracer.finish_run(
+                status="completed",
+                final_answer=final_answer,
+                stopped_reason="completed" if failed_count == 0 else "completed_with_failures",
+                total_input_tokens=0,
+                total_output_tokens=0,
+            )
+        return final_answer
+
+    # ------------------------------------------------------------------
+    # Strategy C — Rigorous: full pipeline including draft + challenger + final
+    # ------------------------------------------------------------------
+
+    async def _run_rigorous(
+        self, question: str, tracer: TraceRecorder | None, memory: MemoryStore | None
+    ) -> str:
+        plan = await self.planner.create_plan(question)
         if tracer:
             await tracer.record_step(
-                step_type="fact_check",
-                input_data={"findings": findings_text},
-                output_data={"notes": fact_check_notes},
+                step_type="plan",
+                input_data={"question": question},
+                output_data={"tasks": [t.model_dump() for t in plan.tasks]},
             )
 
-        # --- Stage 4: Critique ---
-        empty_tools = ToolRegistry()
-        critic = ResearchAgent(
-            model=self.model, tools=empty_tools, system_prompt=CRITIC_SYSTEM_PROMPT
-        )
-        critique_result = await critic.run(
-            f"Findings:\n{findings_text}\n\nFact-check notes:\n{fact_check_notes}",
-            tracer=tracer,
-            record_run=False,
-        )
-        critique_notes = critique_result.final_answer or "No critique produced."
-        if tracer:
-            await tracer.record_step(
-                step_type="critique",
-                input_data={"findings": findings_text, "fact_check": fact_check_notes},
-                output_data={"critique": critique_notes},
-            )
+        run_id = tracer.run_id if tracer else uuid.uuid4()
+        task_results = list(await asyncio.gather(
+            *[self._run_task_isolated(task, run_id, memory) for task in plan.tasks],
+        ))
+        findings_text = self._format_findings(task_results)
 
-        # --- Stage 5: Draft Synthesis ---
-        draft_conclusion = await self._synthesize_draft(
-            question, findings_text, fact_check_notes, critique_notes
-        )
+        fact_check_notes = await self._run_fact_check(findings_text, tracer)
+        critique_notes = await self._run_critique(findings_text, fact_check_notes, tracer)
+
+        draft_conclusion = await self._synthesize_draft(question, findings_text, fact_check_notes, critique_notes)
         if tracer:
             await tracer.record_step(
                 step_type="draft_synthesis",
@@ -104,7 +161,6 @@ class Orchestrator:
                 output_data={"draft": draft_conclusion},
             )
 
-        # --- Stage 6: Challenge (has tools — actively searches for counter-evidence) ---
         challenger = ResearchAgent(
             model=self.model, tools=self.tools, system_prompt=CHALLENGER_SYSTEM_PROMPT
         )
@@ -121,7 +177,6 @@ class Orchestrator:
                 output_data={"counter_evidence": challenge_notes},
             )
 
-        # --- Stage 7: Final Synthesis (must address the challenge) ---
         final_answer = await self._synthesize_final(
             question, findings_text, fact_check_notes, critique_notes,
             draft_conclusion, challenge_notes,
@@ -136,12 +191,62 @@ class Orchestrator:
                 total_input_tokens=0,
                 total_output_tokens=0,
             )
-
         return final_answer
 
+    # ------------------------------------------------------------------
+    # Shared helper stages (used by both Standard and Rigorous)
+    # ------------------------------------------------------------------
+
+    async def _run_fact_check(self, findings_text: str, tracer: TraceRecorder | None) -> str:
+        fact_checker = ResearchAgent(
+            model=self.model, tools=self.tools, system_prompt=FACT_CHECKER_SYSTEM_PROMPT
+        )
+        fc_result = await fact_checker.run(
+            f"Findings to verify:\n{findings_text}", tracer=tracer, record_run=False
+        )
+        fact_check_notes = fc_result.final_answer or "No fact-check notes produced."
+        if tracer:
+            await tracer.record_step(
+                step_type="fact_check",
+                input_data={"findings": findings_text},
+                output_data={"notes": fact_check_notes},
+            )
+        return fact_check_notes
+
+    async def _run_critique(
+        self, findings_text: str, fact_check_notes: str, tracer: TraceRecorder | None
+    ) -> str:
+        critic = ResearchAgent(
+            model=self.model, tools=ToolRegistry(), system_prompt=CRITIC_SYSTEM_PROMPT
+        )
+        critique_result = await critic.run(
+            f"Findings:\n{findings_text}\n\nFact-check notes:\n{fact_check_notes}",
+            tracer=tracer,
+            record_run=False,
+        )
+        critique_notes = critique_result.final_answer or "No critique produced."
+        if tracer:
+            await tracer.record_step(
+                step_type="critique",
+                input_data={"findings": findings_text, "fact_check": fact_check_notes},
+                output_data={"critique": critique_notes},
+            )
+        return critique_notes
+
+    # ------------------------------------------------------------------
+    # Parallel task execution (V5)
+    # ------------------------------------------------------------------
+
     async def _run_task_isolated(
-        self, task, run_id: uuid.UUID, memory: MemoryStore | None,
+        self,
+        task,
+        run_id: uuid.UUID,
+        memory: MemoryStore | None,
     ) -> TaskResult:
+        """Runs one research task with its own DB session — required for
+        safe concurrent writes. Never raises; failures are captured in the
+        result so one bad task can't take down the whole gather()."""
+
         task_prompt = task.description
         try:
             if memory:
@@ -170,10 +275,18 @@ class Orchestrator:
 
         except Exception as e:
             failed_result = AgentRunResult(
-                final_answer=None, messages=[], steps_taken=0,
-                stopped_reason=f"error: {e}", total_input_tokens=0, total_output_tokens=0,
+                final_answer=None,
+                messages=[],
+                steps_taken=0,
+                stopped_reason=f"error: {e}",
+                total_input_tokens=0,
+                total_output_tokens=0,
             )
             return TaskResult(task.id, task.description, failed_result)
+
+    # ------------------------------------------------------------------
+    # Formatting / synthesis helpers
+    # ------------------------------------------------------------------
 
     def _format_findings(self, task_results: list[TaskResult]) -> str:
         lines = []
