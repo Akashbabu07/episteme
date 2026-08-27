@@ -2,12 +2,14 @@ import asyncio
 import uuid
 
 from app.infrastructure.db import get_session
-from app.agents.planner import Planner, ResearchPlan
+from app.agents.planner import Planner
 from app.agents.research_agent import ResearchAgent, AgentRunResult
 from app.agents.roles import (
     FACT_CHECKER_SYSTEM_PROMPT,
     CRITIC_SYSTEM_PROMPT,
     SYNTHESIZER_SYSTEM_PROMPT,
+    CHALLENGER_SYSTEM_PROMPT,
+    UPDATED_SYNTHESIZER_SYSTEM_PROMPT,
 )
 from app.models.base import Message, ModelInterface
 from app.memory.store import MemoryStore
@@ -50,14 +52,12 @@ class Orchestrator:
                 output_data={"tasks": [t.model_dump() for t in plan.tasks]},
             )
 
-        # --- Stage 2: Research (PARALLEL — one Researcher per task) ---
+        # --- Stage 2: Research (parallel) ---
         run_id = tracer.run_id if tracer else uuid.uuid4()
         task_results = await asyncio.gather(
             *[self._run_task_isolated(task, run_id, memory) for task in plan.tasks],
-            return_exceptions=False,  # _run_task_isolated already catches internally
         )
         task_results = list(task_results)
-
         findings_text = self._format_findings(task_results)
 
         # --- Stage 3: Fact Check ---
@@ -75,7 +75,7 @@ class Orchestrator:
                 output_data={"notes": fact_check_notes},
             )
 
-        # --- Stage 4: Critique (no tools — pure reasoning over text) ---
+        # --- Stage 4: Critique ---
         empty_tools = ToolRegistry()
         critic = ResearchAgent(
             model=self.model, tools=empty_tools, system_prompt=CRITIC_SYSTEM_PROMPT
@@ -93,8 +93,39 @@ class Orchestrator:
                 output_data={"critique": critique_notes},
             )
 
-        # --- Stage 5: Synthesize ---
-        final_answer = await self._synthesize(question, findings_text, fact_check_notes, critique_notes)
+        # --- Stage 5: Draft Synthesis ---
+        draft_conclusion = await self._synthesize_draft(
+            question, findings_text, fact_check_notes, critique_notes
+        )
+        if tracer:
+            await tracer.record_step(
+                step_type="draft_synthesis",
+                input_data={"findings": findings_text, "critique": critique_notes},
+                output_data={"draft": draft_conclusion},
+            )
+
+        # --- Stage 6: Challenge (has tools — actively searches for counter-evidence) ---
+        challenger = ResearchAgent(
+            model=self.model, tools=self.tools, system_prompt=CHALLENGER_SYSTEM_PROMPT
+        )
+        challenge_result = await challenger.run(
+            f"Draft conclusion to challenge:\n{draft_conclusion}",
+            tracer=tracer,
+            record_run=False,
+        )
+        challenge_notes = challenge_result.final_answer or "No challenge produced."
+        if tracer:
+            await tracer.record_step(
+                step_type="challenge",
+                input_data={"draft_conclusion": draft_conclusion},
+                output_data={"counter_evidence": challenge_notes},
+            )
+
+        # --- Stage 7: Final Synthesis (must address the challenge) ---
+        final_answer = await self._synthesize_final(
+            question, findings_text, fact_check_notes, critique_notes,
+            draft_conclusion, challenge_notes,
+        )
 
         if tracer:
             failed_count = sum(1 for t in task_results if not t.succeeded)
@@ -109,15 +140,8 @@ class Orchestrator:
         return final_answer
 
     async def _run_task_isolated(
-        self,
-        task,
-        run_id: uuid.UUID,
-        memory: MemoryStore | None,
+        self, task, run_id: uuid.UUID, memory: MemoryStore | None,
     ) -> TaskResult:
-        """Runs one research task with its own DB session — required for
-        safe concurrent writes. Never raises; failures are captured in the
-        result so one bad task can't take down the whole gather()."""
-
         task_prompt = task.description
         try:
             if memory:
@@ -128,13 +152,12 @@ class Orchestrator:
 
             async with get_session() as isolated_session:
                 isolated_tracer = TraceRecorder(isolated_session)
-                isolated_tracer.run_id = run_id  # attach to the SAME run, don't start a new one
+                isolated_tracer.run_id = run_id
 
                 researcher = ResearchAgent(model=self.model, tools=self.tools)
                 result = await researcher.run(task_prompt, tracer=isolated_tracer, record_run=False)
 
             if memory and result.final_answer:
-                # Memory writes use their own session too, for the same reason
                 async with get_session() as mem_session:
                     mem_store = MemoryStore(mem_session)
                     await mem_store.store(
@@ -147,12 +170,8 @@ class Orchestrator:
 
         except Exception as e:
             failed_result = AgentRunResult(
-                final_answer=None,
-                messages=[],
-                steps_taken=0,
-                stopped_reason=f"error: {e}",
-                total_input_tokens=0,
-                total_output_tokens=0,
+                final_answer=None, messages=[], steps_taken=0,
+                stopped_reason=f"error: {e}", total_input_tokens=0, total_output_tokens=0,
             )
             return TaskResult(task.id, task.description, failed_result)
 
@@ -164,7 +183,7 @@ class Orchestrator:
             lines.append(f"- Task: {tr.description}\n  Status: {status}\n  Result: {answer}")
         return "\n".join(lines)
 
-    async def _synthesize(
+    async def _synthesize_draft(
         self, question: str, findings: str, fact_check: str, critique: str
     ) -> str:
         synthesis_input = (
@@ -179,4 +198,24 @@ class Orchestrator:
                 Message(role="user", content=synthesis_input),
             ],
         )
-        return response.content or "Unable to synthesize a final answer."
+        return response.content or "Unable to produce a draft conclusion."
+
+    async def _synthesize_final(
+        self, question: str, findings: str, fact_check: str, critique: str,
+        draft: str, challenge: str,
+    ) -> str:
+        synthesis_input = (
+            f"Original question: {question}\n\n"
+            f"Research findings:\n{findings}\n\n"
+            f"Fact-check notes:\n{fact_check}\n\n"
+            f"Critique:\n{critique}\n\n"
+            f"Draft conclusion:\n{draft}\n\n"
+            f"Challenger's counter-evidence:\n{challenge}"
+        )
+        response = await self.model.generate(
+            messages=[
+                Message(role="system", content=UPDATED_SYNTHESIZER_SYSTEM_PROMPT),
+                Message(role="user", content=synthesis_input),
+            ],
+        )
+        return response.content or "Unable to produce a final conclusion."
