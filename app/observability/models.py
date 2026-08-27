@@ -66,3 +66,14 @@ class EvaluationRecord(Base):
     overall_score: Mapped[float] = mapped_column()
     notes: Mapped[dict] = mapped_column(JSON)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now_utc)
+
+class FailureAnalysisRecord(Base):
+    __tablename__ = "failure_analyses"
+
+    id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid.uuid4)
+    run_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("runs.id"))
+    evaluation_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("evaluations.id"))
+    flagged_dimensions: Mapped[dict] = mapped_column(JSON)  # {"source_quality": 0.3, ...}
+    root_cause: Mapped[str] = mapped_column(Text)
+    improvement_recommendation: Mapped[str] = mapped_column(Text)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now_utc)
