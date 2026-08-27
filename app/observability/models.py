@@ -51,3 +51,18 @@ class MemoryRecord(Base):
     content: Mapped[str] = mapped_column(Text)
     embedding: Mapped[list] = mapped_column(JSON)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now_utc)
+
+class EvaluationRecord(Base):
+    __tablename__ = "evaluations"
+
+    id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid.uuid4)
+    run_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("runs.id"))
+    completeness: Mapped[float] = mapped_column()
+    tool_usage_efficiency: Mapped[float] = mapped_column()
+    source_quality: Mapped[float] = mapped_column()
+    contradiction_handling: Mapped[float] = mapped_column()
+    factual_accuracy: Mapped[float] = mapped_column()
+    reasoning_quality: Mapped[float] = mapped_column()
+    overall_score: Mapped[float] = mapped_column()
+    notes: Mapped[dict] = mapped_column(JSON)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now_utc)
