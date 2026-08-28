@@ -250,7 +250,9 @@ class Orchestrator:
         task_prompt = task.description
         try:
             if memory:
-                relevant = await memory.retrieve_relevant(task.description)
+                async with get_session() as mem_read_session:
+                    mem_read_store = MemoryStore(mem_read_session)
+                    relevant = await mem_read_store.retrieve_relevant(task.description)
                 if relevant:
                     context = "\n".join(f"- {r}" for r in relevant)
                     task_prompt = f"{task.description}\n\nRelevant prior findings:\n{context}"
