@@ -17,9 +17,15 @@ class OllamaProvider(ModelInterface):
         messages: list[Message],
         tools: list[dict[str, Any]] | None = None,
     ) -> ModelResponse:
-        ollama_messages = [
-            {"role": m.role, "content": m.content} for m in messages
-        ]
+        ollama_messages = []
+        for m in messages:
+            entry: dict[str, Any] = {"role": m.role, "content": m.content}
+            if m.role == "tool":
+                if m.tool_call_id:
+                    entry["tool_call_id"] = m.tool_call_id
+                if m.name:
+                    entry["name"] = m.name
+            ollama_messages.append(entry)
 
         response = await self.client.chat(
             model=self.model,
