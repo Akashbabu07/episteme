@@ -4,6 +4,7 @@ from app.agents.orchestrator import Orchestrator
 from app.infrastructure.db import init_db, get_session
 from app.models.ollama_provider import OllamaProvider
 from app.tools.base import ToolRegistry
+from fastapi.middleware.cors import CORSMiddleware
 from app.tools.calculator import CalculatorTool
 from app.tools.web_search import WebSearchTool
 from app.tools.fetch_page import FetchPageTool
@@ -47,6 +48,13 @@ async def research(request: ResearchRequest) -> ResearchAnswer:
         run_id=str(tracer.run_id),
         stopped_reason="completed",
     )
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["http://localhost:5173"],  
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 @app.get("/health")
 async def health() -> dict[str, str]:
