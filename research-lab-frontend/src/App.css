@@ -1,0 +1,67 @@
+.app {
+  max-width: 640px;
+  margin: 0 auto;
+  padding: 2rem 1rem;
+  font-family: system-ui, sans-serif;
+}
+
+.question-form {
+  display: flex;
+  flex-direction: column;
+  gap: 0.75rem;
+}
+
+textarea {
+  font-family: inherit;
+  font-size: 1rem;
+  padding: 0.75rem;
+  border: 1px solid #ccc;
+  border-radius: 8px;
+  resize: vertical;
+}
+
+button {
+  align-self: flex-start;
+  padding: 0.6rem 1.2rem;
+  font-size: 1rem;
+  border: none;
+  border-radius: 8px;
+  background: #1a1a1a;
+  color: white;
+  cursor: pointer;
+}
+
+button:disabled {
+  background: #999;
+  cursor: not-allowed;
+}
+
+.status-box {
+  margin-top: 1.5rem;
+  color: #666;
+  font-style: italic;
+}
+
+.error-box {
+  margin-top: 1.5rem;
+  padding: 1rem;
+  background: #fee;
+  border: 1px solid #f99;
+  border-radius: 8px;
+  color: #900;
+}
+
+.result-box {
+  margin-top: 1.5rem;
+  padding: 1.25rem;
+  border: 1px solid #ddd;
+  border-radius: 8px;
+}
+
+.meta {
+  margin-top: 1rem;
+  display: flex;
+  gap: 1.5rem;
+  font-size: 0.85rem;
+  color: #666;
+}
