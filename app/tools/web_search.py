@@ -38,7 +38,12 @@ class WebSearchTool(Tool):
 
     async def execute(self, **kwargs: Any) -> ToolResult:
         query = kwargs.get("query", "")
-        max_results = min(kwargs.get("max_results", 5), 10)
+
+        raw_max_results = kwargs.get("max_results", 5)
+        try:
+            max_results = min(int(raw_max_results), 10)
+        except (TypeError, ValueError):
+            max_results = 5 
 
         if not query:
             return ToolResult(success=False, output=None, error="query is required")
